@@ -295,7 +295,9 @@
     {/if}
 
     {#if settings}
-        <Turntable layout={vinylLayout} playlist={settings.playlist} />
+        {#key settings.mp3s?.id}
+            <Turntable layout={vinylLayout} playlist={settings.playlist} library={settings.mp3s} still={settings.puddingStill} />
+        {/key}
     {/if}
 
     <div id="settings" class:asleep={fullscreenEnabled && !awake && !setupOpen} class:solo={fullscreenEnabled}>

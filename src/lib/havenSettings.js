@@ -9,7 +9,8 @@ export const LOGO_POSITIONS = [
 ];
 
 const KEY = "harpa:haven";
-const EMPTY = { onboarded: false, logo: null, logoPosition: "top-center", playlist: null, playlistTitle: null };
+const PLAYBACK_KEY = "harpa:playback";
+const EMPTY = { onboarded: false, logo: null, logoPosition: "top-center", playlist: null, playlistTitle: null, mp3s: null, puddingStill: false };
 
 export function loadSettings() {
     try {
@@ -26,6 +27,22 @@ export function saveSettings(settings) {
         return true;
     } catch {
         return false;
+    }
+}
+
+export function loadPlayback() {
+    try {
+        return JSON.parse(localStorage.getItem(PLAYBACK_KEY));
+    } catch {
+        return null;
+    }
+}
+
+export function savePlayback(playback) {
+    try {
+        localStorage.setItem(PLAYBACK_KEY, JSON.stringify(playback));
+    } catch {
+        // losing your spot beats breaking the radio
     }
 }
 

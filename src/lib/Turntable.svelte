@@ -2,12 +2,21 @@
 // @ts-nocheck
     import { onMount } from "svelte";
     import { resolve } from "$app/paths";
-    import { DEFAULT_PLAYLIST } from "#lib/havenSettings.js";
+    import { DEFAULT_PLAYLIST, loadPlayback, savePlayback } from "#lib/havenSettings.js";
+    import { LOCAL_EVENTS, createLocalWidget, loadLibrary } from "#lib/localMusic.js";
+    import { createPudding } from "#lib/pudding.js";
 
-    let { layout = "corner", playlist = DEFAULT_PLAYLIST } = $props();
+    let { layout = "corner", playlist = DEFAULT_PLAYLIST, library = null, still = false } = $props();
 
     let activePlaylist;
     const POLL_MS = 60_000;
+    const SAVE_MS = 2000;
+    const RESUME_TIMEOUT_MS = 4000;
+    const JUMP_MS = 2000;
+    const GLIDE_MS = 200;
+    const HOLD_MS = 3000;
+    const FETCH_TRIES = 25;
+    const FETCH_POLL_MS = 200;
 
     const WIDGET_OPTS = {
         hide_related: true,
@@ -25,6 +34,12 @@
     let iframe;
     let scoutFrame;
     let disc;
+    let puddingEl;
+    let spikesEl;
+    let headEl;
+    let expressionEl;
+    let popNotes;
+    let pudding;
     let widget;
     let scout;
 
@@ -35,29 +50,18 @@
     let currentId = null;
     let seekTarget = null;
     let seekUntil = 0;
-    let progressAt = 0;
-
-    const BARS = 10;
-    let viz;
-    let wave = null;
-    let waveUrl = null;
-
-    async function loadWave(url) {
-        waveUrl = url;
-        wave = null;
-        try {
-            const r = await fetch(url);
-            const { samples } = await r.json();
-            if (url !== waveUrl || !samples?.length) return;
-            const sorted = [...samples].sort((a, b) => a - b);
-            const lo = sorted[Math.floor(sorted.length * 0.1)];
-            const hi = sorted[sorted.length - 1];
-            const span = Math.max(1, hi - lo);
-            wave = samples.map((v) => Math.min(1, Math.max(0, (v - lo) / span)));
-        } catch {
-            wave = null;
-        }
-    }
+    let savedAt = 0;
+    let resume = null;
+    let resumeTimer;
+    let fill;
+    let glide;
+    let shownPosition = 0;
+    let shownProgress = 0;
+    let scrubbing = false;
+    let scrubbed = false;
+    let played = [];
+    let pendingId = null;
+    let pendingUntil = 0;
 
     let ready = $state(false);
     let playing = $state(false);
@@ -69,8 +73,24 @@
     let duration = $state(0);
     let trackIndex = $state(0);
     let trackCount = $state(0);
+    let shuffle = $state(false);
 
     let progress = $derived(duration ? Math.min(1, position / duration) : 0);
+
+    // a css transition would restart on every progress tick and crawl
+    $effect(() => {
+        const jumped = Math.abs(position - shownPosition) > JUMP_MS;
+        const from = shownProgress;
+        shownPosition = position;
+        shownProgress = progress;
+        if (!jumped || scrubbed || !fill || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+        const start = glide?.playState === "running" ? getComputedStyle(fill).width : `${from * 100}%`;
+        glide?.cancel();
+        glide = fill.animate(
+            [{ width: start }, { width: `${progress * 100}%` }],
+            { duration: GLIDE_MS, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+        );
+    });
 
     const hiRes = (url) => url?.replace("-large.", "-t500x500.") ?? null;
     const idsOf = (sounds) => (sounds ?? []).map((s) => s.id);
@@ -100,24 +120,91 @@
             ask(widget, "getCurrentSoundIndex"),
             ask(widget, "getSounds"),
         ]);
+        // the widget auto-advances in order before a shuffled pick can land
+        if (pendingId !== null && s?.id !== pendingId && performance.now() < pendingUntil) return;
+        pendingId = null;
         trackCount = sounds?.length ?? 0;
         trackIndex = i ?? 0;
-        if (!s) return;
+        if (!s?.title) return;
         if (s.id !== currentId) {
             seekTarget = null;
             position = 0;
+            if (currentId !== null) pudding?.hop();
         }
         currentId = s.id;
-        const nextWave = s.waveform_url?.replace(/\.png$/, ".json");
-        if (nextWave && nextWave !== waveUrl) loadWave(nextWave);
-        if (!nextWave) { wave = null; waveUrl = null; }
+        if (shuffle && !played.includes(s.id)) played.push(s.id);
         title = s.title;
         artist = s.user?.username ?? "";
         art = hiRes(s.artwork_url || s.user?.avatar_url);
         duration = s.duration;
+        pudding?.loadWave(s.waveform_url, s.duration, s.id);
+    }
+
+    function savePosition() {
+        if (resume || !currentId) return;
+        savedAt = performance.now();
+        savePlayback({ playlist: activePlaylist, id: currentId, position, playing, title, artist, art, duration, shuffle, played });
+    }
+
+    function primeResume() {
+        const saved = loadPlayback();
+        shuffle = !!saved?.shuffle;
+        if (!saved?.id || saved.playlist !== activePlaylist) return;
+        played = saved.played ?? [];
+        resume = saved;
+        currentId = saved.id;
+        position = saved.position;
+        title = saved.title;
+        artist = saved.artist;
+        art = library ? widget.artFor(saved.id) : saved.art;
+        duration = saved.duration;
+    }
+
+    function startResume(ids) {
+        const index = ids.indexOf(resume.id);
+        if (index < 0) {
+            const { playing: wasPlaying } = resume;
+            resume = null;
+            currentId = null;
+            if (wasPlaying) widget.play();
+            refreshSound();
+            return;
+        }
+        trackIndex = index;
+        trackCount = ids.length;
+        hasPlayed = true;
+        widget.setVolume(0);
+        skipAndPlay(index);
+    }
+
+    function endResume() {
+        if (!resume) return;
+        const { playing: wasPlaying } = resume;
+        resume = null;
+        clearTimeout(resumeTimer);
+        resumeTimer = null;
+        widget.setVolume(100);
+        if (!wasPlaying) widget.pause();
+    }
+
+    function dropResume() {
+        if (!resume) return;
+        resume.playing = true;
+        endResume();
+    }
+
+    // skip alone won't start a song the widget hasn't fetched yet
+    async function skipAndPlay(index) {
+        widget.skip(index);
+        if (library) return;
+        for (let i = 0; i < FETCH_TRIES; i++) {
+            await new Promise((res) => setTimeout(res, FETCH_POLL_MS));
+            if ((await ask(widget, "getCurrentSound"))?.title) return widget.play();
+        }
     }
 
     function reloadPlaylist(startAt, autoplay) {
+        dropResume();
         updatePending = false;
         seekTarget = null;
         position = 0;
@@ -127,7 +214,7 @@
             callback: async () => {
                 const sounds = await ask(widget, "getSounds");
                 loadedIds = idsOf(sounds).join(",");
-                if (autoplay && sounds?.length) widget.skip(wrap(startAt, sounds.length));
+                if (autoplay && sounds?.length) skipAndPlay(wrap(startAt, sounds.length));
                 refreshSound();
             },
         });
@@ -184,21 +271,28 @@
     function play() {
         if (!ready) return;
         keepAlive?.play().catch(() => {});
+        if (resume) {
+            resume.playing = true;
+            skipAndPlay(trackIndex);
+            return;
+        }
         widget.play();
     }
 
     function pause() {
         if (!ready) return;
+        if (resume) resume.playing = false;
         keepAlive?.pause();
         widget.pause();
     }
 
     $effect(() => {
         const wanted = playlist || DEFAULT_PLAYLIST;
-        if (!ready || wanted === activePlaylist) return;
+        if (library || !ready || wanted === activePlaylist) return;
         activePlaylist = wanted;
         loadedIds = "";
         latestIds = [];
+        played = [];
         reloadPlaylist(0, playing);
     });
 
@@ -209,6 +303,8 @@
 
     async function next() {
         if (!ready) return;
+        dropResume();
+        if (shuffle) return shuffleNext();
         if (updatePending) return applyUpdate(1);
         const [i, sounds] = await Promise.all([ask(widget, "getCurrentSoundIndex"), ask(widget, "getSounds")]);
         if (i < (sounds?.length ?? 1) - 1) widget.next();
@@ -218,10 +314,55 @@
     async function prev() {
         if (!ready) return;
         if (position > 3000) return seek(0);
+        dropResume();
+        if (shuffle) return shufflePrev();
         if (updatePending) return applyUpdate(-1);
         const [i, sounds] = await Promise.all([ask(widget, "getCurrentSoundIndex"), ask(widget, "getSounds")]);
         if (i > 0) widget.prev();
         else widget.skip((sounds?.length ?? 1) - 1);
+    }
+
+    function toggleShuffle() {
+        shuffle = !shuffle;
+        played = shuffle && currentId ? [currentId] : [];
+        savePosition();
+    }
+
+    function holdFor(id) {
+        pendingId = id;
+        pendingUntil = performance.now() + HOLD_MS;
+    }
+
+    function pickUnplayed(ids) {
+        let fresh = ids.filter((id) => !played.includes(id));
+        if (!fresh.length) {
+            played = [currentId];
+            fresh = ids.filter((id) => id !== currentId);
+        }
+        return fresh[Math.floor(Math.random() * fresh.length)] ?? currentId;
+    }
+
+    async function shuffleNext() {
+        holdFor(-1);
+        const reload = updatePending;
+        const ids = reload ? latestIds : idsOf(await ask(widget, "getSounds"));
+        const id = pickUnplayed(ids);
+        holdFor(id);
+        if (reload) reloadPlaylist(ids.indexOf(id), true);
+        else widget.skip(ids.indexOf(id));
+    }
+
+    async function shufflePrev() {
+        played.pop();
+        const id = played.at(-1);
+        if (id === undefined) {
+            played = [currentId];
+            return seek(0);
+        }
+        const i = idsOf(await ask(widget, "getSounds")).indexOf(id);
+        if (i < 0) return shufflePrev();
+        holdFor(id);
+        widget.skip(i);
     }
 
     function seek(ms) {
@@ -230,23 +371,52 @@
         position = target;
         seekTarget = target;
         seekUntil = performance.now() + 4000;
+        if (resume) resume.position = target;
         widget.seekTo(target);
     }
 
     function onProgress(ms) {
+        if (scrubbing) return;
+        if (resume) {
+            if (Math.abs(ms - resume.position) > 1500) return;
+            endResume();
+        }
         if (seekTarget !== null) {
             const stale = Math.abs(ms - seekTarget) > 1500 && performance.now() < seekUntil;
             if (stale) return;
             seekTarget = null;
         }
         position = ms;
-        progressAt = performance.now();
+        if (performance.now() - savedAt > SAVE_MS) savePosition();
     }
 
-    function seekFromPointer(e) {
-        if (!ready || !duration) return;
+    function pointerMs(e) {
         const r = e.currentTarget.getBoundingClientRect();
-        seek(((e.clientX - r.left) / r.width) * duration);
+        return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * duration;
+    }
+
+    function scrubStart(e) {
+        // a mac context menu swallows the pointerup, so right and ctrl clicks never start a drag
+        if (!ready || !duration || e.button !== 0 || e.ctrlKey) return;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        scrubbing = true;
+        seek(pointerMs(e));
+    }
+
+    function scrubMove(e) {
+        if (!scrubbing) return;
+        if (!e.buttons) return scrubEnd();
+        scrubbed = true;
+        glide?.cancel();
+        position = pointerMs(e);
+        pudding?.nudge(e.movementX);
+    }
+
+    function scrubEnd() {
+        if (!scrubbing) return;
+        scrubbing = false;
+        if (scrubbed) seek(position);
+        scrubbed = false;
     }
 
     function setupMediaKeys() {
@@ -314,6 +484,7 @@
         const step = { ArrowLeft: -5000, ArrowRight: 5000 }[e.key];
         if (!step) return;
         e.preventDefault();
+        pudding?.nudge(Math.sign(step) * 12);
         seek(position + step);
     }
 
@@ -329,28 +500,8 @@
         const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
         const SPIN_DEG_PER_MS = reduced ? 0.012 : 0.054;
         let angle = 0, vel = 0, last = performance.now();
-        const levels = new Array(BARS).fill(0.08);
+        pudding = createPudding({ root: puddingEl, spikes: spikesEl, head: headEl, expression: expressionEl, notes: popNotes, reduced });
 
-        const loudnessAt = (ms) => {
-            if (!wave || !duration) return 0.6;
-            const i = Math.floor((ms / duration) * wave.length);
-            return wave[Math.min(wave.length - 1, Math.max(0, i))];
-        };
-
-        const drawBars = (t, dt) => {
-            if (!viz) return;
-            const now = playing ? position + Math.min(1000, performance.now() - progressAt) : position;
-            const step = duration ? duration / (wave?.length || 1800) : 100;
-            for (let i = 0; i < BARS; i++) {
-                const v = loudnessAt(now + (i - BARS / 2) * step * 2);
-                const wobble =
-                    (0.5 + 0.5 * Math.sin(t * 0.0042 * (1 + i * 0.37) + i * 1.7)) *
-                    (0.6 + 0.4 * Math.sin(t * 0.0023 * (1 + i * 0.21) + i));
-                const target = playing && !reduced ? 0.12 + 0.88 * v * (0.35 + 0.65 * wobble) : 0.08;
-                levels[i] += (target - levels[i]) * (1 - Math.exp(-dt / 110));
-                viz.children[i].style.transform = `scaleY(${levels[i].toFixed(3)})`;
-            }
-        };
         const spin = (t) => {
             const dt = Math.min(64, t - last);
             last = t;
@@ -358,49 +509,87 @@
             vel += (target - vel) * (1 - Math.exp(-dt / 450));
             angle = (angle + vel * dt) % 360;
             if (disc) disc.style.transform = `rotate(${angle}deg)`;
-            drawBars(t, dt);
+            pudding.tick(t, dt, { playing, position, duration, still });
             raf = requestAnimationFrame(spin);
         };
         raf = requestAnimationFrame(spin);
 
         const onVisible = () => { if (!document.hidden) checkPlaylist(); };
+        window.addEventListener("pagehide", savePosition);
 
-        loadScript().then(() => {
-            if (cancelled) return;
-            const E = window.SC.Widget.Events;
+        function offAir(reason) {
+            failed = true;
+            title = "the radio's quiet";
+            artist = reason;
+        }
 
-            activePlaylist = playlist || DEFAULT_PLAYLIST;
-            iframe.src = widgetSrc(true);
-            widget = window.SC.Widget(iframe);
+        function connect(E) {
             widget.bind(E.READY, async () => {
                 ready = true;
-                loadedIds = idsOf(await ask(widget, "getSounds")).join(",");
+                const ids = idsOf(await ask(widget, "getSounds"));
+                loadedIds = ids.join(",");
+                if (resume) return startResume(ids);
+                widget.setVolume(100);
                 refreshSound();
             });
-            widget.bind(E.PLAY, () => { playing = true; hasPlayed = true; refreshSound(); });
-            widget.bind(E.PAUSE, () => { playing = false; });
+            widget.bind(E.PLAY, () => {
+                hasPlayed = true;
+                playing = resume ? resume.playing : true;
+                if (resume) {
+                    widget.seekTo(resume.position);
+                    resumeTimer ||= setTimeout(endResume, RESUME_TIMEOUT_MS);
+                }
+                refreshSound();
+            });
+            widget.bind(E.PAUSE, () => { playing = false; savePosition(); });
             widget.bind(E.PLAY_PROGRESS, (e) => onProgress(e.currentPosition));
             widget.bind(E.SEEK, (e) => onProgress(e.currentPosition));
             widget.bind(E.FINISH, async () => {
                 playing = false;
+                if (shuffle) return shuffleNext();
                 if (updatePending) return applyUpdate(1);
                 const [i, sounds] = await Promise.all([ask(widget, "getCurrentSoundIndex"), ask(widget, "getSounds")]);
                 if (i >= (sounds?.length ?? 1) - 1) widget.skip(0);
             });
+        }
+
+        function startLocal(tracks) {
+            if (cancelled) return;
+            if (!tracks.length) return offAir("your mp3s are gone, add them again in settings");
+            widget = createLocalWidget(tracks);
+            primeResume();
+            connect(LOCAL_EVENTS);
+            widget.start(!resume);
+        }
+
+        function startSoundCloud() {
+            if (cancelled) return;
+            iframe.src = widgetSrc(!resume);
+            widget = window.SC.Widget(iframe);
+            connect(window.SC.Widget.Events);
 
             scoutFrame.src = widgetSrc(false);
             scout = window.SC.Widget(scoutFrame);
             poll = setInterval(checkPlaylist, POLL_MS);
             document.addEventListener("visibilitychange", onVisible);
-        }).catch(() => {
-            failed = true;
-            title = "the radio's quiet";
-            artist = "couldn't reach soundcloud";
-        });
+        }
+
+        if (library) {
+            activePlaylist = `local:${library.id}`;
+            loadLibrary(library.id).catch(() => []).then(startLocal);
+        } else {
+            activePlaylist = playlist || DEFAULT_PLAYLIST;
+            primeResume();
+            loadScript().then(startSoundCloud).catch(() => offAir("couldn't reach soundcloud"));
+        }
 
         return () => {
             cancelled = true;
+            widget?.destroy?.();
             cancelAnimationFrame(raf);
+            pudding.destroy();
+            clearTimeout(resumeTimer);
+            window.removeEventListener("pagehide", savePosition);
             cleanupMediaKeys();
             keepAlive.pause();
             URL.revokeObjectURL(keepAlive.src);
@@ -411,22 +600,24 @@
     });
 </script>
 
-<div class="deck {layout}" class:playing>
-    <iframe
-        bind:this={iframe}
-        class="sc"
-        title="SoundCloud audio"
-        aria-hidden="true"
-        tabindex="-1"
-        allow="autoplay; encrypted-media"
-    ></iframe>
-    <iframe
-        bind:this={scoutFrame}
-        class="sc"
-        title="SoundCloud playlist check"
-        aria-hidden="true"
-        tabindex="-1"
-    ></iframe>
+<div class="deck {layout}" class:playing dir="ltr">
+    {#if !library}
+        <iframe
+            bind:this={iframe}
+            class="sc"
+            title="SoundCloud audio"
+            aria-hidden="true"
+            tabindex="-1"
+            allow="autoplay; encrypted-media"
+        ></iframe>
+        <iframe
+            bind:this={scoutFrame}
+            class="sc"
+            title="SoundCloud playlist check"
+            aria-hidden="true"
+            tabindex="-1"
+        ></iframe>
+    {/if}
 
     <div class="slot">
         <div class="vinyl" bind:this={disc}>
@@ -446,14 +637,42 @@
     </div>
 
     <div class="tagwrap">
-        <img class="pudding" src={resolve("haven/pudding.webp")} alt="Pudding the hedgehog" />
-        <div class="viz" bind:this={viz} aria-hidden="true">
-            {#each { length: BARS } as _}<span></span>{/each}
+        <div class="popnotes" bind:this={popNotes} aria-hidden="true">
+            <span>♪</span><span>♫</span><span>♪</span><span>♫</span>
         </div>
+        <button class="pudding" bind:this={puddingEl} aria-label="Boop Pudding the hedgehog" title="Boop Pudding" onclick={() => pudding?.boop()}>
+            <img class="spikes" bind:this={spikesEl} src={resolve("haven/pudding-spikes.webp")} alt="" draggable="false" />
+            <span class="head" bind:this={headEl}>
+                <img class="face" src={resolve("haven/pudding-face.webp")} alt="" draggable="false" />
+                <svg class="expression" bind:this={expressionEl} viewBox="0 0 1650 1864" aria-hidden="true">
+                    <g class="shape shut">
+                        <circle cx="642" cy="722" r="38" />
+                        <circle cx="998" cy="687" r="38" />
+                        <path d="M606 722q36 26 72 0M962 687q36 26 72 0" />
+                    </g>
+                    <g class="shape happy">
+                        <circle cx="642" cy="722" r="38" />
+                        <circle cx="998" cy="687" r="38" />
+                        <path d="M606 738q36 -44 72 0M962 703q36 -44 72 0" />
+                    </g>
+                    <g class="shape wide">
+                        <circle cx="642" cy="722" r="38" />
+                        <circle cx="998" cy="687" r="38" />
+                        <circle class="ink" cx="642" cy="722" r="35" />
+                        <circle class="ink" cx="998" cy="687" r="35" />
+                    </g>
+                    <g class="shape wow">
+                        <ellipse cx="843" cy="756" rx="66" ry="46" />
+                        <ellipse class="ink" cx="843" cy="770" rx="20" ry="28" />
+                    </g>
+                </svg>
+            </span>
+            <span class="zzz" aria-hidden="true"><span>z</span><span>z</span><span>z</span></span>
+        </button>
         <div class="tag">
             <div aria-live="polite">
-                <p class="title" title={title}>{title}</p>
-                <p class="artist">{artist || " "}</p>
+                <p class="title" title={title} dir="auto">{title}</p>
+                <p class="artist" dir="auto">{artist || " "}</p>
             </div>
 
             <div
@@ -465,10 +684,14 @@
                 aria-valuemax={Math.round(duration / 1000)}
                 aria-valuenow={Math.round(position / 1000)}
                 aria-valuetext="{fmt(position)} of {fmt(duration)}"
-                onpointerdown={seekFromPointer}
+                onpointerdown={scrubStart}
+                onpointermove={scrubMove}
+                onpointerup={scrubEnd}
+                onpointercancel={scrubEnd}
+                onlostpointercapture={scrubEnd}
                 onkeydown={seekFromKey}
             >
-                <div class="fill" style:width="{progress * 100}%"></div>
+                <div class="fill" bind:this={fill} style:width="{progress * 100}%"></div>
             </div>
 
             <div class="foot">
@@ -476,6 +699,9 @@
                     {#if failed}off air{:else}{fmt(position)} / {fmt(duration)}{#if trackCount}<span class="no">no. {trackIndex + 1} of {trackCount}</span>{/if}{/if}
                 </span>
                 <div class="controls">
+                    <button class="shuffle" class:on={shuffle} aria-label="Shuffle" aria-pressed={shuffle} title={shuffle ? "Shuffle on" : "Shuffle off"} onclick={toggleShuffle} disabled={!ready}>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="s" d="M3 7h3.2c1.9 0 3.1.8 4.1 2.4l3.4 5.2c1 1.6 2.2 2.4 4.1 2.4H20M3 17h3.2c1.5 0 2.6-.5 3.5-1.5M14.3 8.5c.9-1 2-1.5 3.5-1.5H20M17.5 4 20.5 7l-3 3M17.5 14l3 3-3 3" /></svg>
+                    </button>
                     <button aria-label="Previous" title="Previous" onclick={prev} disabled={!ready}>
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path class="s" d="M6 5.5v13" /><path d="M18 6.5 9 12l9 5.5z" /></svg>
                     </button>
@@ -498,7 +724,7 @@
 <style>
     .deck {
         --disc: 112px;
-        --tag-w: 236px;
+        --tag-w: 272px;
 
         position: fixed;
         z-index: 1000;
@@ -539,41 +765,105 @@
         border: 0;
     }
 
-    .viz {
-        position: absolute;
-        z-index: 0;
-        right: 16px;
-        bottom: calc(100% - 6px);
-        display: flex;
-        align-items: flex-end;
-        gap: 3px;
-        height: 30px;
-    }
-    .viz span {
-        width: 5px;
-        height: 100%;
-        border-radius: 3px 3px 0 0;
-        background: var(--rust);
-        transform: scaleY(0.08);
-        transform-origin: bottom;
-        will-change: transform;
-    }
-
     .pudding {
         position: absolute;
         z-index: 0;
         width: 150px;
+        aspect-ratio: 1650 / 1864;
         left: 12px;
-        bottom: calc(100% - 24px);
-        transform-origin: bottom center;
+        bottom: calc(100% - 87.6px);
+        padding: 0;
+        border: 0;
+        background: none;
+        cursor: pointer;
+        transform-origin: 50% 62.4%;
+        will-change: transform;
+        -webkit-tap-highlight-color: transparent;
     }
-    .playing .pudding {
-        animation: bob 1.6s ease-in-out infinite;
+    .pudding:focus-visible {
+        outline: 3px solid var(--rust-deep);
+        outline-offset: 2px;
     }
-    @keyframes bob {
-        0%, 100% { transform: translateY(0) rotate(0deg); }
-        25% { transform: translateY(-3px) rotate(-3deg); }
-        75% { transform: translateY(-3px) rotate(3deg); }
+    .pudding img,
+    .head,
+    .expression {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        user-select: none;
+    }
+    .spikes {
+        transform-origin: 47.5% 38%;
+        will-change: transform;
+    }
+    .head {
+        transform-origin: 47.5% 38%;
+        will-change: transform;
+    }
+    .expression {
+        pointer-events: none;
+    }
+    .shape {
+        opacity: 0;
+    }
+    .shape circle,
+    .shape ellipse {
+        fill: #f7a387;
+    }
+    .shape .ink {
+        fill: #803a27;
+    }
+    .shape path {
+        fill: none;
+        stroke: #803a27;
+        stroke-width: 16;
+        stroke-linecap: round;
+    }
+
+    .zzz {
+        position: absolute;
+        left: 74%;
+        top: 21%;
+        pointer-events: none;
+    }
+    .zzz span {
+        position: absolute;
+        font-family: var(--font-display);
+        font-size: 15px;
+        color: #fff;
+        text-shadow: 0 0 6px var(--haven-orange-deep);
+        opacity: 0;
+    }
+    .pudding:global(.asleep) .zzz span {
+        animation: snooze 3.6s ease-out infinite;
+    }
+    .pudding:global(.asleep) .zzz span:nth-child(2) {
+        animation-delay: 1.2s;
+    }
+    .pudding:global(.asleep) .zzz span:nth-child(3) {
+        animation-delay: 2.4s;
+    }
+    @keyframes snooze {
+        0% { opacity: 0; transform: translate(0, 6px) scale(0.6); }
+        20% { opacity: 1; }
+        100% { opacity: 0; transform: translate(20px, -34px) scale(1.15) rotate(12deg); }
+    }
+
+    .popnotes {
+        position: absolute;
+        z-index: 0;
+        left: 86px;
+        bottom: calc(100% + 56px);
+        pointer-events: none;
+    }
+    .popnotes span {
+        position: absolute;
+        font-size: 17px;
+        font-family: system-ui, sans-serif;
+        color: #fff;
+        opacity: 0;
+        text-shadow: 0 0 8px var(--haven-orange-deep);
     }
 
     .slot {
@@ -737,10 +1027,29 @@
         outline-offset: 4px;
     }
     .fill {
+        position: relative;
         height: 100%;
         border-radius: inherit;
         background: var(--rust);
-        transition: width 0.25s linear;
+    }
+    .fill::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        right: -6.5px;
+        width: 13px;
+        height: 13px;
+        margin-top: -6.5px;
+        border-radius: 50%;
+        background: var(--rust-deep);
+        box-shadow: 0 0 0 2px var(--sticker);
+        transition: transform 0.15s ease-out;
+    }
+    .progress:hover .fill::after {
+        transform: scale(1.15);
+    }
+    .progress:active .fill::after {
+        transform: scale(1.3);
     }
 
     .foot {
@@ -787,6 +1096,28 @@
     .controls button.play * {
         color: var(--sticker);
     }
+    .controls button.shuffle {
+        position: relative;
+    }
+    .controls button.shuffle,
+    .controls button.shuffle * {
+        color: var(--sticker-ink-soft);
+    }
+    .controls button.shuffle.on,
+    .controls button.shuffle.on * {
+        color: var(--rust-deep);
+    }
+    .controls button.shuffle.on::after {
+        content: "";
+        position: absolute;
+        left: 50%;
+        bottom: 0;
+        width: 4px;
+        height: 4px;
+        margin-left: -2px;
+        border-radius: 50%;
+        background: var(--rust-deep);
+    }
     .controls svg {
         width: 20px;
         height: 20px;
@@ -819,8 +1150,8 @@
     }
 
     @media (prefers-reduced-motion: reduce) {
-        .playing .pudding,
-        .playing .notes span { animation: none; }
+        .playing .notes span,
+        .pudding:global(.asleep) .zzz span { animation: none; }
         .slot { transition: none; }
     }
 </style>

@@ -1,6 +1,7 @@
 <script>
 // @ts-nocheck
     import { LOGO_POSITIONS, logoFromFile, resolvePlaylist } from "#lib/havenSettings.js";
+    import { importZip, pruneLibraries } from "#lib/localMusic.js";
 
     let { open = false, firstRun = false, settings, onsave, onclose } = $props();
 
@@ -14,6 +15,11 @@
     let error = $state("");
     let busy = $state(false);
     let dragging = $state(false);
+    let mp3s = $state(null);
+    let importing = $state(null);
+    let zipDragging = $state(false);
+    let importer = null;
+    let puddingStill = $state(false);
 
     $effect(() => {
         if (!dialog) return;
@@ -24,6 +30,8 @@
             playlist = settings.playlist;
             playlistTitle = settings.playlistTitle;
             playlistInput = "";
+            mp3s = settings.mp3s;
+            puddingStill = settings.puddingStill;
             error = "";
             dialog.showModal();
         } else if (!open && dialog.open) {
@@ -53,6 +61,39 @@
         takeFile(e.dataTransfer?.files?.[0]);
     }
 
+    async function takeZip(file) {
+        if (!file) return;
+        error = "";
+        importer = new AbortController();
+        const { signal } = importer;
+        importing = "Opening your zip…";
+        try {
+            mp3s = await importZip(file, {
+                signal,
+                onProgress: (n, total) => (importing = `Reading song ${n} of ${total}…`),
+            });
+            playlistInput = "";
+        } catch (e) {
+            if (!signal.aborted) error = e.message;
+        } finally {
+            importing = null;
+            importer = null;
+        }
+    }
+
+    function onZipDrop(e) {
+        e.preventDefault();
+        zipDragging = false;
+        takeZip(e.dataTransfer?.files?.[0]);
+    }
+
+    function onZipPick(e) {
+        takeZip(e.currentTarget.files?.[0]);
+        e.currentTarget.value = "";
+    }
+
+    const prune = (keep) => pruneLibraries(keep?.id ?? null).catch(() => {});
+
     async function commitPlaylistInput() {
         if (!playlistInput.trim()) return true;
         busy = true;
@@ -72,9 +113,16 @@
     }
 
     async function finish() {
-        if (!(await commitPlaylistInput())) return;
-        const ok = onsave({ onboarded: true, logo, logoPosition, playlist, playlistTitle });
+        if (importing || !(await commitPlaylistInput())) return;
+        const ok = onsave({ onboarded: true, logo, logoPosition, playlist, playlistTitle, mp3s, puddingStill });
         if (ok === false) error = "That logo is too big to save in this browser. Try a smaller file.";
+        else prune(mp3s);
+    }
+
+    function cancel() {
+        importer?.abort();
+        prune(settings.mp3s);
+        onclose();
     }
 
     function skipLogo() {
@@ -93,7 +141,7 @@
     function onCancel(e) {
         e.preventDefault();
         if (firstRun) onsave({ ...settings, onboarded: true });
-        else onclose();
+        else cancel();
     }
 </script>
 
@@ -104,6 +152,7 @@
             {#if firstRun}
                 <p class="lede">lets get your music app set up! first, upload you logo and then add your playlist. if you leave either blank, you can change them in the top right later by clicking the gear icon to open settings :)</p>
                 <p class="steps">Step {step + 1} of 2</p>
+                <!-- hi lynn -->
             {/if}
         </header>
 
@@ -145,28 +194,70 @@
         {#if showPlaylist}
             <section>
                 <h3>Your playlist</h3>
-                {#if playlist}
+                {#if mp3s}
                     <div class="current">
-                        <span>Playing <strong>{playlistTitle ?? "your playlist"}</strong></span>
-                        <button type="button" class="link" onclick={() => { playlist = null; playlistTitle = null; }}>Use the default</button>
+                        <span>Playing <strong>{mp3s.name}</strong> ({mp3s.count} {mp3s.count === 1 ? "song" : "songs"})</span>
+                        <button type="button" class="link" onclick={() => (mp3s = null)}>Back to SoundCloud</button>
                     </div>
+                    {#if mp3s.skipped}
+                        <p class="hint">skipped {mp3s.skipped} that wouldn't play</p>
+                    {/if}
+                {:else}
+                    {#if playlist}
+                        <div class="current">
+                            <span>Playing <strong>{playlistTitle ?? "your playlist"}</strong></span>
+                            <button type="button" class="link" onclick={() => { playlist = null; playlistTitle = null; }}>Use the default</button>
+                        </div>
+                    {/if}
+                    <input
+                        class="text"
+                        type="url"
+                        inputmode="url"
+                        placeholder="https://soundcloud.com/you/sets/your-playlist"
+                        aria-label="SoundCloud playlist link"
+                        bind:value={playlistInput}
+                    />
+                    <p class="hint">
+                        {playlist ? "paste a different link to swap it" : "you can paste a public SoundCloud playlist or leave it empty to play the default playlist"}
+                    </p>
+                    {#if !firstRun}
+                        <details class="more">
+                            <summary>Use your own MP3s instead</summary>
+                            {#if importing}
+                                <p class="hint" role="status">{importing}</p>
+                            {:else}
+                                <label
+                                    class="drop small"
+                                    class:dragging={zipDragging}
+                                    ondragover={(e) => { e.preventDefault(); zipDragging = true; }}
+                                    ondragleave={() => (zipDragging = false)}
+                                    ondrop={onZipDrop}
+                                >
+                                    <input type="file" accept=".zip,application/zip" aria-label="Zip file of MP3s" onchange={onZipPick} />
+                                    <span class="drop-text">Drop a zip of MP3s here, or <u>choose a file</u></span>
+                                </label>
+                                <p class="hint">songs only stay in this browser, so do this on the laptop hooked to the projector</p>
+                            {/if}
+                        </details>
+                    {/if}
                 {/if}
-                <input
-                    class="text"
-                    type="url"
-                    inputmode="url"
-                    placeholder="https://soundcloud.com/you/sets/your-playlist"
-                    aria-label="SoundCloud playlist link"
-                    bind:value={playlistInput}
-                />
-                <p class="hint">
-                    {playlist ? "paste a different link to swap it" : "you can paste a public SoundCloud playlist or leave it empty to play the default playlist"}
-                </p>
+            </section>
+        {/if}
+
+        {#if !firstRun}
+            <section>
+                <h3>Pudding</h3>
+                <label class="field">
+                    <span>Stop Pudding dancing</span>
+                    <input type="checkbox" bind:checked={puddingStill} />
+                </label>
+                <p class="hint">he'll still blink, nap and look around</p>
             </section>
         {/if}
 
         {#if error}
             <p class="error" role="alert">{error}</p>
+            <!-- say wallahi youre reading this -->
         {/if}
 
         <footer>
@@ -178,8 +269,8 @@
                 <button type="button" class="ghost" onclick={skipPlaylist} disabled={busy}>Skip</button>
                 <button type="submit" class="primary" disabled={busy}>{busy ? "Checking…" : "Done"}</button>
             {:else}
-                <button type="button" class="ghost" onclick={onclose} disabled={busy}>Cancel</button>
-                <button type="submit" class="primary" disabled={busy}>{busy ? "Checking…" : "Save"}</button>
+                <button type="button" class="ghost" onclick={cancel} disabled={busy}>Cancel</button>
+                <button type="submit" class="primary" disabled={busy || !!importing}>{busy ? "Checking…" : "Save"}</button>
             {/if}
         </footer>
     </form>
@@ -202,6 +293,7 @@
     }
     .setup[open] {
         animation: rise 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+        /* son */
     }
     @keyframes rise {
         from { opacity: 0; transform: translateY(16px); }
@@ -271,6 +363,7 @@
     .drop.filled {
         border-style: solid;
         border-color: transparent;
+        /* BLYNNP */
     }
     .drop:focus-within {
         outline: 3px solid var(--rust-deep);
@@ -287,6 +380,9 @@
         max-height: 140px;
         object-fit: contain;
         pointer-events: none;
+    }
+    .drop.small {
+        min-height: 84px;
     }
     .drop-text {
         font-size: 16px;
@@ -316,6 +412,25 @@
         font-family: var(--font-display);
         font-size: 17px;
         letter-spacing: -0.02em;
+    }
+
+    .more summary {
+        width: fit-content;
+        cursor: pointer;
+        font-size: 14px;
+        text-decoration: underline;
+        text-underline-offset: 3px;
+    }
+    .more summary:hover {
+        color: var(--rust-deep);
+    }
+    .more summary:focus-visible {
+        outline: 3px solid var(--rust-deep);
+        outline-offset: 3px;
+    }
+    .more .drop,
+    .more .hint {
+        margin-top: 10px;
     }
 
     .current {
@@ -355,6 +470,14 @@
             url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%23704020' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg>") no-repeat right 14px center,
             #fff;
     }
+    .field input {
+        flex: none;
+        width: 20px;
+        height: 20px;
+        margin: 0;
+        accent-color: var(--rust-deep);
+        cursor: pointer;
+    }
     .field select option {
         color: var(--sticker-ink);
     }
@@ -364,6 +487,7 @@
     .text:focus {
         outline: 3px solid var(--rust-deep);
         outline-offset: 2px;
+        /*  */
     }
 
     .error {
