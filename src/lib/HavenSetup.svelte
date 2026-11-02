@@ -150,7 +150,7 @@
         <header>
             <h2 id="setup-title">{firstRun ? "Set up your Haven" : "Haven settings"}</h2>
             {#if firstRun}
-                <p class="lede">lets get your music app set up! first, upload you logo and then add your playlist. if you leave either blank, you can change them in the top right later by clicking the gear icon to open settings :)</p>
+                <p class="lede">lets get your music app set up! first, upload your logo and then add your playlist. if you leave either blank, you can change them in the top right later by clicking the gear icon to open settings :)</p>
                 <p class="steps">Step {step + 1} of 2</p>
                 <!-- hi lynn -->
             {/if}

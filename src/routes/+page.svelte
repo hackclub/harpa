@@ -94,10 +94,10 @@
             transform: translateX(0px)
         }
         50% {
-            transform: translateX(35px)
-        }
-        50% {
             transform: translateX(-35px)
+        }
+        100% {
+            transform: translateX(0px)
         }
     }
 
@@ -117,10 +117,10 @@
             transform: translateX(0px)
         }
         50% {
-            transform: translateX(-20px)
-        }
-        50% {
             transform: translateX(20px)
+        }
+        100% {
+            transform: translateX(0px)
         }
     }
 
@@ -141,8 +141,8 @@
         left: 70px;
         top: 50px;
         opacity: 0.2;
-        animation: treeLeft infinite 15s ease-in-out, surgeLite 15s infinite ease-in-out;
-        animation-delay: 5s;
+        animation: surgeLite 15s infinite ease-in-out;
+        animation-delay: 2s;
     }
 
     @keyframes surge {
@@ -163,14 +163,14 @@
     @keyframes surgeLite {
         0%, 100% {
             opacity: 0.2;
-            transform: rotate(0deg);
+            transform: rotate(0deg) translateX(0px);
         }
         40% {
             opacity: 0.25;
         }
-        60% {
+        50% {
             opacity: 0.3;
-            transform: rotate(-4.5deg);
+            transform: rotate(-5deg) translateX(-35px);
         }
         85% {
             opacity: 0.25;
