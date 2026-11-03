@@ -23,12 +23,12 @@
     let timeString = $state("...");
     let customTextValue = $state("Type here directly")
     onMount(() => {
-        if (sessionStorage.getItem("customTextValue") != null) {
-            customTextValue = sessionStorage.getItem("customTextValue");
+        if (localStorage.getItem("customTextValue") != null) {
+            customTextValue = localStorage.getItem("customTextValue");
         }
         window.setInterval(() => {
             timeString = new Date().toLocaleTimeString();
-            sessionStorage.setItem("customTextValue", customTextValue);
+            localStorage.setItem("customTextValue", customTextValue);
         })
     }, 5*1000);
 
