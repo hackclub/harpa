@@ -1,9 +1,16 @@
 <script>
 // @ts-nocheck
+    import { slide } from "svelte/transition";
+
     import { LOGO_POSITIONS, logoFromFile, resolvePlaylist } from "#lib/havenSettings.js";
     import { importZip, pruneLibraries } from "#lib/localMusic.js";
 
     let { open = false, firstRun = false, settings, onsave, onclose } = $props();
+
+    const TEXTBOX_OPTIONS = [
+    { value: "current-time", label: "Current time" },
+    { value: "custom-text", label: "Custom text" }
+];
 
     let dialog;
     let step = $state(0);
@@ -20,6 +27,10 @@
     let zipDragging = $state(false);
     let importer = null;
     let puddingStill = $state(false);
+    let hideLogos = $state(false);
+
+    let showTextboxInternal = $state(false); // this defines on/off
+    let showTextbox = $state(0); // this defines mode
 
     $effect(() => {
         if (!dialog) return;
@@ -32,6 +43,9 @@
             playlistInput = "";
             mp3s = settings.mp3s;
             puddingStill = settings.puddingStill;
+            hideLogos = settings.hideLogos;
+            showTextboxInternal = settings.showTextboxInternal
+            showTextbox = settings.showTextbox;
             error = "";
             dialog.showModal();
         } else if (!open && dialog.open) {
@@ -114,7 +128,7 @@
 
     async function finish() {
         if (importing || !(await commitPlaylistInput())) return;
-        const ok = onsave({ onboarded: true, logo, logoPosition, playlist, playlistTitle, mp3s, puddingStill });
+        const ok = onsave({ onboarded: true, logo, logoPosition, playlist, playlistTitle, mp3s, puddingStill, hideLogos, showTextboxInternal, showTextbox });
         if (ok === false) error = "That logo is too big to save in this browser. Try a smaller file.";
         else prune(mp3s);
     }
@@ -153,6 +167,7 @@
                 <p class="lede">lets get your music app set up! first, upload your logo and then add your playlist. if you leave either blank, you can change them in the top right later by clicking the gear icon to open settings :)</p>
                 <p class="steps">Step {step + 1} of 2</p>
                 <!-- hi lynn -->
+                <!-- hi alex! -->
             {/if}
         </header>
 
@@ -181,13 +196,22 @@
                     {/if}
                 </div>
                 <label class="field">
-                    <span>Logo position</span>
-                    <select class="text" bind:value={logoPosition}>
-                        {#each LOGO_POSITIONS as option (option.value)}
-                            <option value={option.value}>{option.label}</option>
-                        {/each}
-                    </select>
+                    <span>Hide Logos</span>
+                    <input type="checkbox" bind:checked={hideLogos} />
                 </label>
+                {#if !hideLogos}
+                <div transition:slide>
+                    <label class="field">
+                        <span>Logo position</span>
+                        <select class="text" bind:value={logoPosition}>
+                            {#each LOGO_POSITIONS as option (option.value)}
+                                <option value={option.value}>{option.label}</option>
+                            {/each}
+                        </select>
+                    </label>
+                </div>
+                {/if}
+                
             </section>
         {/if}
 
@@ -253,11 +277,32 @@
                 </label>
                 <p class="hint">he'll still blink, nap and look around</p>
             </section>
+            <details class="more">
+                <summary style:margin-bottom=20px>More settings</summary>
+                <section>
+                    <h3>Display Text</h3>
+                    <label class="field">
+                        <span>Enable text box</span>
+                        <input type="checkbox" bind:checked={showTextboxInternal} />
+                    </label>
+                    {#if !showTextboxInternal}<p style:margin-top=0px class="hint">you can display a text box on the screen, and either edit it or show the time</p>
+                    {:else}
+                        <label class="field" style:margin-top=5px>
+                            <span>Text mode</span>
+                            <select class="text" bind:value={showTextbox}>
+                                {#each TEXTBOX_OPTIONS as option (option.value)}
+                                    <option value={option.value}>{option.label}</option>
+                                {/each}
+                            </select>
+                        </label>
+                        <p style:margin-top=0px class="hint">custom messages are edited from the screen directly</p>
+                    {/if}
+                </section>
+            </details>
         {/if}
 
         {#if error}
             <p class="error" role="alert">{error}</p>
-            <!-- say wallahi youre reading this -->
         {/if}
 
         <footer>

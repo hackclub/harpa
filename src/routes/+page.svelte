@@ -2,6 +2,7 @@
 // @ts-nocheck
 
     import { onMount } from "svelte";
+    import { fade, slide } from "svelte/transition";
     import { resolve } from "$app/paths";
     import Turntable from "#lib/Turntable.svelte";
     import HavenSetup from "#lib/HavenSetup.svelte";
@@ -18,6 +19,18 @@
     let setupFirstRun = $state(false);
     let awake = $state(false);
     let sleepTimer;
+
+    let timeString = $state("...");
+    let customTextValue = $state("Type here directly")
+    onMount(() => {
+        if (sessionStorage.getItem("customTextValue") != null) {
+            customTextValue = sessionStorage.getItem("customTextValue");
+        }
+        window.setInterval(() => {
+            timeString = new Date().toLocaleTimeString();
+            sessionStorage.setItem("customTextValue", customTextValue);
+        })
+    }, 5*1000);
 
     function handleSave(next) {
         if (!saveSettings(next)) return false;
@@ -274,6 +287,21 @@
         pointer-events: auto;
     }
 
+    #customTextbox {
+        z-index: 1000;
+        position: fixed;
+        transform: translate(-50%, -50%);
+        left: 48%;
+        top: 38%;
+        color: white;
+        font-size: 40px;
+        font-family: "Darumadrop One", "Jua", ui-rounded, system-ui, sans-serif;
+        margin: 30px;
+        overflow: wrap;
+        text-align: center;
+        text-shadow: 0px 0px 10px black;
+    }
+
 </style>
 
 <svelte:window bind:innerWidth={width} bind:innerHeight={height} onpointermove={wake} onpointerdown={wake} onkeydown={wake}></svelte:window>
@@ -285,8 +313,8 @@
     <img id="sun2" src={resolve("haven/sun2.webp")} alt="Ray of sunshine" />
 
 
-    {#if settings}
-        <div id="logos" class="pos-{settings.logoPosition}" class:clear={!fullscreenEnabled}>
+    {#if settings && !settings.hideLogos}
+        <div transition:fade id="logos" class="pos-{settings.logoPosition}" class:clear={!fullscreenEnabled}>
             <img src={havenLogo} alt="Hack Club Haven" />
             {#if settings.logo}
                 <img class="org" src={settings.logo} alt="Local Haven logo" />
@@ -298,6 +326,16 @@
         {#key settings.mp3s?.id}
             <Turntable layout={vinylLayout} playlist={settings.playlist} library={settings.mp3s} still={settings.puddingStill} />
         {/key}
+    {/if}
+
+    {#if settings && settings.showTextboxInternal}
+        <div id="customTextbox" transition:slide>
+            {#if settings.showTextbox == "custom-text"}
+            <h2 id="customTextboxEdit" bind:textContent={customTextValue} contenteditable="true">{customTextValue}</h2>
+            {:else}
+            <h2 style:font-size=80px style:user-select="none" id="customTextboxEdit">{timeString}</h2>
+            {/if}
+        </div>
     {/if}
 
     <div id="settings" class:asleep={fullscreenEnabled && !awake && !setupOpen} class:solo={fullscreenEnabled}>

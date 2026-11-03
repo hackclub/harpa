@@ -1,12 +1,12 @@
 <script>
-	import favicon from '#lib/assets/favicon.svg';
+	import favicon from '#lib/assets/harpa.png';
 	import "#lib/styles.css";
 
 	let { children } = $props();
 </script>
 
 <svelte:head>
-	<title>Harpa | Haven</title>
+	<title>Harpa</title>
 	<link rel="icon" href={favicon} />
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com">
