@@ -2,6 +2,7 @@
 // @ts-nocheck
 
     import { onMount } from "svelte";
+    import { page } from "$app/state";
     import { fade, slide } from "svelte/transition";
     import { resolve } from "$app/paths";
     import Turntable from "#lib/Turntable.svelte";
@@ -31,6 +32,13 @@
             localStorage.setItem("customTextValue", customTextValue);
         })
     }, 5*1000);
+
+    let jumbotron = $state(false);
+    onMount(() => {
+        if (page.url.searchParams.get("jumbotron")) {
+            jumbotron = true;
+        }
+    })
 
     function handleSave(next) {
         if (!saveSettings(next)) return false;
@@ -278,6 +286,9 @@
         right: 20px;
         display: none;
     }
+    #settings.shiftSolo {
+        right: 20px;
+    }
     #settings.asleep {
         opacity: 0;
         pointer-events: none;
@@ -338,13 +349,15 @@
         </div>
     {/if}
 
-    <div id="settings" class:asleep={fullscreenEnabled && !awake && !setupOpen} class:solo={fullscreenEnabled}>
+    <div id="settings" class:asleep={fullscreenEnabled && !awake && !setupOpen} class:solo={fullscreenEnabled} class:shiftSolo={jumbotron}>
         <button title="Haven settings" aria-label="Haven settings" onclick={openSettings} translate="no"><span class="material-symbols-outlined">settings</span></button>
     </div>
+    {#if !jumbotron}
     <div id="fullscreen" class:dissapear={fullscreenEnabled}>
         <button title="Enter Fullscreen" onclick={fullscreen} translate="no"><span class="material-symbols-outlined">fullscreen</span></button>
         <!--<p>Use {"<f>"} key to enter fullscreen</p>-->
     </div>
+    {/if}
 
     {#if settings}
         <HavenSetup
